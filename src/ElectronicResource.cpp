@@ -25,10 +25,23 @@ ElectronicResource::ElectronicResource(std::string id, std::string title,
         throw std::invalid_argument("platform fee must not be negative");
 }
 
-Money ElectronicResource::costFor(int seats) const {
+Money ElectronicResource::costFor(int seats) const { 
     requirePositive(seats);
-    return platformFee_ + unitPrice() * seats;
-}
+    if (seats <= 50) {
+        return platformFee_ + unitPrice() * seats;
+    }
+
+    int discountedSeats = seats - 50;
+
+    Money halfPrice =
+        Money::fromMinor(unitPrice().minorUnits() / 2);
+
+    return platformFee_
+           + unitPrice() * 50
+           + halfPrice * discountedSeats;
+ }
+    
+
 
 void ElectronicResource::printDetails(std::ostream& os) const {
     os << "  access url: " << accessUrl_ << "\n"

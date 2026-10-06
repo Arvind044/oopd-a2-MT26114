@@ -49,6 +49,15 @@ static void testResourcesAndCost() {
     CHECK(b.category() == ResourceCategory::Book);
     CHECK(!b.isDigital());
     CHECK(b.costFor(3) == Money::of(300));
+    Book hardcover("B2", "Hardcover Test", {"Author"}, "isbn2", "P", 2020,
+               Money::of(100), 1, Binding::Hardcover);
+
+    CHECK(hardcover.costFor(3) == Money::of(360));
+    Book bulkBook("B3", "Bulk Test", {"Author"}, "isbn3", "P", 2020,
+              Money::of(100));
+
+    CHECK(bulkBook.costFor(9) == Money::of(900));
+    CHECK(bulkBook.costFor(10) == Money::of(900));
     CHECK_THROWS(b.costFor(0), std::invalid_argument);
     CHECK(joinAuthors(b.authors()) == "A, B and C");
 
@@ -56,6 +65,9 @@ static void testResourcesAndCost() {
                          LicenseModel::AnnualSubscription, Money::of(100));
     CHECK(e.isDigital());
     CHECK(e.costFor(5) == Money::of(150));
+    CHECK(e.costFor(50) == Money::of(600));
+    CHECK(e.costFor(51) == Money::of(605));
+    CHECK(e.costFor(60) == Money::of(650));
 
     CHECK(e.category() == ResourceCategory::ElectronicResource);
 
@@ -293,6 +305,58 @@ static void testAcquisition() {
     CHECK(c.holdings("R1") == 10 && c.holdings("B1") == 3);
     CHECK(acq.history().size() == 6);
 }
+void testTaxes() {
+    Catalog c;
+
+    c.add(std::make_unique<Book>(
+        "TB1", "Tax Book", std::vector<std::string>{"Author"},
+        "isbn-tax", "Publisher", 2025, Money::of(100)));
+
+    c.add(std::make_unique<ElectronicResource>(
+        "TR1", "Tax Electronic", "Publisher", 2025,
+        Money::of(100), "https://example.com",
+        LicenseModel::AnnualSubscription, Money::of(0)));
+
+    Budget b(Money::of(10000));
+    AcquisitionManager acq(c, b);
+
+    acq.setTaxRates(10, 20);
+
+    CHECK(acq.purchase("TB1", 2).preTaxCost == Money::of(200));
+    CHECK(acq.history().back().cost == Money::of(220));
+
+    CHECK(acq.purchase("TR1", 2).preTaxCost == Money::of(200));
+    CHECK(acq.history().back().cost == Money::of(240));
+        Catalog quotaCatalog;
+
+    quotaCatalog.add(std::make_unique<Book>(
+        "QB1", "Quota Tax Book", std::vector<std::string>{"Author"},
+        "isbn-quota", "Publisher", 2025, Money::of(100)));
+
+    Budget quotaBudget(Money::of(1000));
+    quotaBudget.setQuota(
+        ResourceCategory::Book,
+        Quota{2, Money::of(210)}
+    );
+
+    AcquisitionManager quotaAcq(quotaCatalog, quotaBudget);
+    quotaAcq.setTaxRates(10, 20);
+
+    std::string reason;
+    CHECK(!quotaAcq.canPurchase("QB1", 2, &reason));
+    CHECK(!reason.empty());
+    CHECK(quotaBudget.spent() == Money::of(0));
+    CHECK(quotaCatalog.holdings("QB1") == 0);
+        std::ostringstream report;
+    acq.printReport(report);
+
+    CHECK(report.str().find("pre-tax 200.00") != std::string::npos);
+    CHECK(report.str().find("post-tax 220.00") != std::string::npos);
+    CHECK(report.str().find("pre-tax 200.00") != std::string::npos);
+    CHECK(report.str().find("post-tax 240.00") != std::string::npos);
+    CHECK(report.str().find("Total pre-tax: 400.00") != std::string::npos);
+    CHECK(report.str().find("Total post-tax: 460.00") != std::string::npos);
+}
 
 int main() {
     testMoney();
@@ -304,6 +368,7 @@ int main() {
     testCatalog();
     testBudget();
     testAcquisition();
+    testTaxes();
     std::cout << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";
     return g_failures == 0 ? 0 : 1;
 }

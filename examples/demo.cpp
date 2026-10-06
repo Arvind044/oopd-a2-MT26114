@@ -78,7 +78,9 @@ int main() {
 
     std::cout << "\n=== Quotes ===\n";
     std::cout << "5 copies of B002  = " << acq.quote("B002", 5) << "\n";
+    std::cout << "10 copies of B001 = " << acq.quote("B001", 10) << "  (10% bulk discount)\n";
     std::cout << "20 seats of R001  = " << acq.quote("R001", 20) << "  (incl. platform fee)\n";
+    std::cout << "60 seats of R001  = " << acq.quote("R001", 60)  << "  (seats beyond 50 are half price)\n";
     std::cout << "5 seats of E001   = " << acq.quote("E001", 5) << "  (inherited electronic pricing)\n";
     std::cout << "5 seats of A001   = " << acq.quote("A001", 5) << "  (inherited electronic pricing)\n";
     std::cout << "5 copies of T001  = " << acq.quote("T001", 5) << "  (free thesis)\n";
@@ -116,5 +118,17 @@ int main() {
     } catch (const QuotaExceededError& e) {
         std::cout << "QuotaExceededError: " << e.what() << "\n";
     }
+        std::cout << "\n=== Tax demonstration ===\n";
+
+    Budget taxBudget(Money::of(10000));
+
+    AcquisitionManager taxAcq(catalog, taxBudget);
+
+    taxAcq.setTaxRates(10, 20);
+
+    taxAcq.purchase("B001", 2);
+    taxAcq.purchase("R001", 2);
+
+    taxAcq.printReport(std::cout);
     return 0;
 }
