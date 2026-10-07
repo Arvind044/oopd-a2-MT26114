@@ -748,6 +748,321 @@ static void testVendorPricing() {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Q13 tests ────────────────────────────────────────────────────────────────
+static void testCatalogSearchesAndPersistence() {
+    Catalog cat;
+    cat.emplace<Book>("B1", "Clean Code", std::vector<std::string>{"Robert C. Martin"},
+                      "978-0132350884", "Prentice Hall", 2008, Money::of(450), 1, Binding::Paperback);
+    cat.emplace<Book>("B2", "Design Patterns", std::vector<std::string>{"Erich Gamma", "Richard Helm", "Ralph Johnson", "John Vlissides"},
+                      "978-0201633610", "Addison-Wesley", 1994, Money::of(550), 1, Binding::Hardcover);
+    cat.emplace<EBook>("E1", "The C++ Programming Language", std::vector<std::string>{"Bjarne Stroustrup"},
+                       "978-0321563842", "Addison-Wesley", 2013, Money::of(100),
+                       "https://example.com/cpp", LicenseModel::AnnualSubscription, Money::of(50),
+                       EBookFormat::PDF, true);
+    cat.emplace<AudioBook>("A1", "Clean Architecture Audio", "Addison-Wesley", 2017,
+                           Money::of(120), "https://example.com/audio", "Uncle Bob", 600,
+                           LicenseModel::Perpetual, Money::of(0));
+    cat.emplace<Journal>("J1", "Nature Communications", "Nature Publishing", 2020,
+                         Money::of(500), "2041-1723", 12, 2);
+    cat.emplace<Thesis>("T1", "Quantum Computing Foundations", "IIIT Delhi", 2022,
+                        Money::of(0), "IIIT Delhi", "Ph.D", "Dr. Bhattacharya");
+    cat.emplace<ElectronicResource>("ER1", "ACM Digital Library", "ACM", 2019,
+                                    Money::of(200), "https://acm.org",
+                                    LicenseModel::AnnualSubscription, Money::of(1000));
+
+    cat.addHoldings("B1", 5);
+    cat.addHoldings("E1", 10);
+    cat.addHoldings("J1", 2);
+
+    // 1. Author Search (Book and EBook)
+    CHECK(cat.searchAuthor("martin").size() == 1);
+    CHECK(cat.searchAuthor("martin")[0]->id() == "B1");
+    CHECK(cat.searchAuthor("STROUSTRUP").size() == 1);
+    CHECK(cat.searchAuthor("STROUSTRUP")[0]->id() == "E1");
+    CHECK(cat.searchAuthor("Johnson").size() == 1);
+    CHECK(cat.searchAuthor("Johnson")[0]->id() == "B2");
+    CHECK(cat.searchAuthor("Unknown Author").empty());
+
+    // 2. ISBN / ISSN Search
+    CHECK(cat.searchIsbnIssn("0132350884").size() == 1);
+    CHECK(cat.searchIsbnIssn("0132350884")[0]->id() == "B1");
+    CHECK(cat.searchIsbnIssn("0321563842").size() == 1);
+    CHECK(cat.searchIsbnIssn("0321563842")[0]->id() == "E1");
+    CHECK(cat.searchIsbnIssn("2041-1723").size() == 1);
+    CHECK(cat.searchIsbnIssn("2041-1723")[0]->id() == "J1");
+    CHECK(cat.searchIsbnIssn("9999999").empty());
+
+    // 3. Publication Year Range Search
+    auto res90s = cat.searchYearRange(1990, 2000);
+    CHECK(res90s.size() == 1);
+    CHECK(res90s[0]->id() == "B2"); // 1994
+
+    auto res2010to2020 = cat.searchYearRange(2010, 2020);
+    CHECK(res2010to2020.size() == 4); // E1 (2013), A1 (2017), ER1 (2019), J1 (2020)
+
+    auto resExact2008 = cat.searchYearRange(2008, 2008);
+    CHECK(resExact2008.size() == 1);
+    CHECK(resExact2008[0]->id() == "B1");
+
+    CHECK(cat.searchYearRange(1900, 1950).empty());
+    CHECK_THROWS(cat.searchYearRange(2025, 2020), std::invalid_argument);
+
+    // 4. In-Memory Persistence (save -> load round-trip)
+    std::stringstream ss;
+    cat.save(ss);
+
+    Catalog loadedCat;
+    loadedCat.load(ss);
+
+    CHECK(loadedCat.size() == cat.size());
+    CHECK(loadedCat.holdings("B1") == 5);
+    CHECK(loadedCat.holdings("E1") == 10);
+    CHECK(loadedCat.holdings("J1") == 2);
+    CHECK(loadedCat.holdings("B2") == 0);
+
+    // Verify exact derived types and properties
+    auto b1 = dynamic_cast<const Book*>(loadedCat.find("B1"));
+    CHECK(b1 != nullptr);
+    CHECK(b1->title() == "Clean Code");
+    CHECK(b1->authors().size() == 1);
+    CHECK(b1->authors()[0] == "Robert C. Martin");
+    CHECK(b1->isbn() == "978-0132350884");
+    CHECK(b1->publisher() == "Prentice Hall");
+    CHECK(b1->year() == 2008);
+    CHECK(b1->unitPrice() == Money::of(450));
+    CHECK(b1->binding() == Binding::Paperback);
+
+    auto b2 = dynamic_cast<const Book*>(loadedCat.find("B2"));
+    CHECK(b2 != nullptr);
+    CHECK(b2->binding() == Binding::Hardcover);
+    CHECK(b2->authors().size() == 4);
+
+    auto eb1 = dynamic_cast<const EBook*>(loadedCat.find("E1"));
+    CHECK(eb1 != nullptr);
+    CHECK(eb1->format() == EBookFormat::PDF);
+    CHECK(eb1->drm() == true);
+    CHECK(eb1->license() == LicenseModel::AnnualSubscription);
+    CHECK(eb1->platformFee() == Money::of(50));
+    CHECK(eb1->accessUrl() == "https://example.com/cpp");
+
+    auto ab1 = dynamic_cast<const AudioBook*>(loadedCat.find("A1"));
+    CHECK(ab1 != nullptr);
+    CHECK(ab1->narrator() == "Uncle Bob");
+    CHECK(ab1->durationMinutes() == 600);
+    CHECK(ab1->license() == LicenseModel::Perpetual);
+
+    auto j1 = dynamic_cast<const Journal*>(loadedCat.find("J1"));
+    CHECK(j1 != nullptr);
+    CHECK(j1->issn() == "2041-1723");
+    CHECK(j1->issuesPerYear() == 12);
+    CHECK(j1->subscriptionYears() == 2);
+
+    auto t1 = dynamic_cast<const Thesis*>(loadedCat.find("T1"));
+    CHECK(t1 != nullptr);
+    CHECK(t1->university() == "IIIT Delhi");
+    CHECK(t1->degree() == "Ph.D");
+    CHECK(t1->supervisor() == "Dr. Bhattacharya");
+
+    auto er1 = dynamic_cast<const ElectronicResource*>(loadedCat.find("ER1"));
+    CHECK(er1 != nullptr);
+    CHECK(dynamic_cast<const EBook*>(er1) == nullptr);
+    CHECK(dynamic_cast<const AudioBook*>(er1) == nullptr);
+
+    // Verify searches still work on restored catalog
+    CHECK(loadedCat.searchAuthor("martin").size() == 1);
+    CHECK(loadedCat.searchIsbnIssn("2041-1723").size() == 1);
+    CHECK(loadedCat.searchYearRange(1990, 2000).size() == 1);
+
+    // 5. File Persistence (saveToFile -> loadFromFile)
+    const std::string tempFile = "temp_catalog_test.txt";
+    cat.saveToFile(tempFile);
+
+    Catalog fileLoadedCat;
+    fileLoadedCat.loadFromFile(tempFile);
+    CHECK(fileLoadedCat.size() == cat.size());
+    CHECK(fileLoadedCat.find("B1") != nullptr);
+    std::remove(tempFile.c_str());
+
+    // 6. Atomic loading error preservation
+    Catalog intactCat;
+    intactCat.emplace<Book>("KEEP1", "Original Book", std::vector<std::string>{"Orig"},
+                            "isbn-orig", "Pub", 2020, Money::of(50));
+    std::stringstream corruptedStream;
+    corruptedStream << "Book|CORRUPT|MissingFields\n";
+    CHECK_THROWS(intactCat.load(corruptedStream), std::runtime_error);
+    CHECK(intactCat.size() == 1);
+    CHECK(intactCat.find("KEEP1") != nullptr);
+
+    // Unknown type tag error
+    std::stringstream unknownTypeStream;
+    unknownTypeStream << "UnknownType|ID|Title\n";
+    CHECK_THROWS(intactCat.load(unknownTypeStream), std::runtime_error);
+    CHECK(intactCat.size() == 1);
+
+    // Non-existent file error
+    CHECK_THROWS(fileLoadedCat.loadFromFile("non_existent_file_12345.txt"), std::runtime_error);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Q14 tests ────────────────────────────────────────────────────────────────
+static void testLending() {
+    Catalog cat;
+    cat.emplace<Book>("B1", "Clean Code", std::vector<std::string>{"Robert C. Martin"},
+                      "isbn-b1", "Pub", 2008, Money::of(450));
+    cat.emplace<Journal>("J1", "Nature", "Springer", 2024, Money::of(500), "2045-2322", 12, 1);
+    cat.emplace<Thesis>("T1", "ML Research", "IIITD", 2026, Money::of(0), "IIITD", "M.Tech", "Supervisor");
+    cat.emplace<ElectronicResource>("ER1", "IEEE Xplore", "IEEE", 2026, Money::of(100), "https://ieee.org");
+    cat.emplace<EBook>("EB1", "C++ Programming", std::vector<std::string>{"Bjarne"}, "isbn-eb1", "AW", 2013,
+                       Money::of(100), "https://cpp.org");
+    cat.emplace<AudioBook>("AB1", "Audio Book 1", "AW", 2020, Money::of(80), "https://audio.org", "Narrator", 300);
+
+    // Initial holdings
+    cat.addHoldings("B1", 2);   // 2 print copies
+    cat.addHoldings("J1", 1);   // 1 print copy
+    cat.addHoldings("T1", 0);   // 0 print copies
+    cat.addHoldings("ER1", 2);  // 2 licensed seats
+    cat.addHoldings("EB1", 1);  // 1 licensed seat
+
+    LendingManager lending(cat);
+
+    // 1. Initial Availability checks
+    CHECK(lending.availableCopies("B1") == 2);
+    CHECK(lending.activeLoansCount("B1") == 0);
+    CHECK(lending.availableSeats("ER1") == 2);
+    CHECK(lending.activeSessionsCount("ER1") == 0);
+    CHECK(lending.availableCopies("T1") == 0);
+
+    // 2. Successful borrow and return
+    std::string reason;
+    CHECK(lending.canBorrow("P1", "B1", &reason));
+    lending.borrow("P1", "B1");
+    CHECK(lending.hasBorrowed("P1", "B1"));
+    CHECK(lending.activeLoansCount("B1") == 1);
+    CHECK(lending.availableCopies("B1") == 1);
+    CHECK(cat.holdings("B1") == 2); // Catalog holdings must NEVER be decremented!
+
+    lending.returnResource("P1", "B1");
+    CHECK(!lending.hasBorrowed("P1", "B1"));
+    CHECK(lending.activeLoansCount("B1") == 0);
+    CHECK(lending.availableCopies("B1") == 2);
+    CHECK(cat.holdings("B1") == 2); // Catalog holdings untouched
+
+    // 3. Capacity limit on print copies
+    lending.borrow("P1", "B1");
+    lending.borrow("P2", "B1");
+    CHECK(lending.availableCopies("B1") == 0);
+    CHECK(lending.activeLoansCount("B1") == 2);
+
+    // Borrowing when 0 copies available (capacity limit exceeded)
+    CHECK(!lending.canBorrow("P3", "B1", &reason));
+    CHECK(reason.find("no copies available") != std::string::npos);
+    CHECK_THROWS(lending.borrow("P3", "B1"), UnavailableError);
+    CHECK(lending.activeLoansCount("B1") == 2); // state unchanged
+
+    // 4. Borrowing with zero initial holdings (T1 has 0 holdings)
+    CHECK(!lending.canBorrow("P1", "T1", &reason));
+    CHECK_THROWS(lending.borrow("P1", "T1"), UnavailableError);
+    CHECK(lending.activeLoansCount("T1") == 0);
+
+    // 5. Invalid return: patron didn't borrow the resource
+    CHECK_THROWS(lending.returnResource("P3", "B1"), LendingError);
+    CHECK_THROWS(lending.returnResource("P1", "J1"), LendingError);
+    CHECK(lending.activeLoansCount("B1") == 2); // state unchanged
+
+    // 6. Duplicate borrow by same patron for same resource
+    CHECK(!lending.canBorrow("P1", "B1", &reason));
+    CHECK(reason.find("already borrowed") != std::string::npos);
+    CHECK_THROWS(lending.borrow("P1", "B1"), LendingError);
+    CHECK(lending.activeLoansCount("B1") == 2); // state unchanged
+
+    // 7. Successful electronic session open/close
+    CHECK(lending.canOpenSession("P1", "ER1", &reason));
+    lending.openSession("P1", "ER1");
+    CHECK(lending.hasSession("P1", "ER1"));
+    CHECK(lending.activeSessionsCount("ER1") == 1);
+    CHECK(lending.availableSeats("ER1") == 1);
+    CHECK(cat.holdings("ER1") == 2); // Catalog holdings must NEVER be decremented!
+
+    lending.closeSession("P1", "ER1");
+    CHECK(!lending.hasSession("P1", "ER1"));
+    CHECK(lending.activeSessionsCount("ER1") == 0);
+    CHECK(lending.availableSeats("ER1") == 2);
+    CHECK(cat.holdings("ER1") == 2);
+
+    // 8. Electronic seat limit
+    lending.openSession("P1", "ER1");
+    lending.openSession("P2", "ER1");
+    CHECK(lending.availableSeats("ER1") == 0);
+    CHECK(lending.activeSessionsCount("ER1") == 2);
+
+    // Opening session when all seats occupied
+    CHECK(!lending.canOpenSession("P3", "ER1", &reason));
+    CHECK(reason.find("all licensed seats occupied") != std::string::npos);
+    CHECK_THROWS(lending.openSession("P3", "ER1"), UnavailableError);
+    CHECK(lending.activeSessionsCount("ER1") == 2); // state unchanged
+
+    // 9. Invalid close: closing session not open
+    CHECK_THROWS(lending.closeSession("P3", "ER1"), LendingError);
+    CHECK_THROWS(lending.closeSession("P1", "EB1"), LendingError);
+    CHECK(lending.activeSessionsCount("ER1") == 2); // state unchanged
+
+    // 10. Duplicate session by same patron on same resource
+    CHECK(!lending.canOpenSession("P1", "ER1", &reason));
+    CHECK(reason.find("already has an open session") != std::string::npos);
+    CHECK_THROWS(lending.openSession("P1", "ER1"), LendingError);
+    CHECK(lending.activeSessionsCount("ER1") == 2); // state unchanged
+
+    // 11. Type mismatches:
+    // borrow() on electronic resource (ER1, EB1, AB1) -> must fail
+    CHECK(!lending.canBorrow("P1", "ER1", &reason));
+    CHECK(reason.find("cannot borrow electronic resource") != std::string::npos);
+    CHECK_THROWS(lending.borrow("P1", "ER1"), LendingError);
+    CHECK_THROWS(lending.borrow("P1", "EB1"), LendingError);
+    CHECK_THROWS(lending.borrow("P1", "AB1"), LendingError);
+
+    // openSession() on print resource (B1, J1, T1) -> must fail
+    CHECK(!lending.canOpenSession("P1", "J1", &reason));
+    CHECK(reason.find("cannot open session on print resource") != std::string::npos);
+    CHECK_THROWS(lending.openSession("P1", "J1"), LendingError);
+    CHECK_THROWS(lending.openSession("P1", "B1"), LendingError);
+    CHECK_THROWS(lending.openSession("P1", "T1"), LendingError);
+
+    // 12. Non-existent resource
+    CHECK(!lending.canBorrow("P1", "NONEXISTENT", &reason));
+    CHECK_THROWS(lending.borrow("P1", "NONEXISTENT"), NotFoundError);
+    CHECK_THROWS(lending.returnResource("P1", "NONEXISTENT"), NotFoundError);
+    CHECK(!lending.canOpenSession("P1", "NONEXISTENT", &reason));
+    CHECK_THROWS(lending.openSession("P1", "NONEXISTENT"), NotFoundError);
+    CHECK_THROWS(lending.closeSession("P1", "NONEXISTENT"), NotFoundError);
+
+    // Invalid patron ID (empty)
+    CHECK_THROWS(lending.borrow("", "B1"), std::invalid_argument);
+    CHECK_THROWS(lending.returnResource("", "B1"), std::invalid_argument);
+    CHECK_THROWS(lending.openSession("", "ER1"), std::invalid_argument);
+    CHECK_THROWS(lending.closeSession("", "ER1"), std::invalid_argument);
+
+    // 13. Patron-specific active queries
+    // P1 currently has: loan on B1, session on ER1
+    // P2 currently has: loan on B1, session on ER1
+    lending.borrow("P1", "J1"); // P1 borrows J1 as well
+    lending.openSession("P1", "EB1"); // P1 opens session on EB1
+
+    auto p1Loans = lending.activeLoansForPatron("P1");
+    CHECK(p1Loans.size() == 2);
+    auto p1Sessions = lending.activeSessionsForPatron("P1");
+    CHECK(p1Sessions.size() == 2);
+
+    auto p2Loans = lending.activeLoansForPatron("P2");
+    CHECK(p2Loans.size() == 1);
+    CHECK(p2Loans[0] == "B1");
+
+    auto p3Loans = lending.activeLoansForPatron("P3");
+    CHECK(p3Loans.empty());
+    auto p3Sessions = lending.activeSessionsForPatron("P3");
+    CHECK(p3Sessions.empty());
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 int main() {
     testMoney();
     testResourcesAndCost();
@@ -765,6 +1080,8 @@ int main() {
     testRollover();
     testAllOrNothingBatch();
     testVendorPricing();
+    testCatalogSearchesAndPersistence();
+    testLending();
     std::cout << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";
     return g_failures == 0 ? 0 : 1;
 }

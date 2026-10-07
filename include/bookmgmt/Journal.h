@@ -19,6 +19,10 @@ public:
 
     ResourceCategory category() const override;
 
+    const std::string& issn() const { return issn_; }
+    int issuesPerYear() const { return issuesPerYear_; }
+    int subscriptionYears() const { return subscriptionYears_; }
+
     Money costFor(int copies) const override;
 
 protected:

@@ -43,8 +43,17 @@ public:
     std::vector<const Resource*> all() const;
     std::vector<const Resource*> byCategory(ResourceCategory c) const;
     std::vector<const Resource*> searchTitle(const std::string& text) const;  // case-insensitive
+    std::vector<const Resource*> searchAuthor(const std::string& text) const; // Q13: case-insensitive
+    std::vector<const Resource*> searchIsbnIssn(const std::string& text) const; // Q13: case-insensitive
+    std::vector<const Resource*> searchYearRange(int startYear, int endYear) const; // Q13: inclusive range
     std::vector<const Resource*> where(
         const std::function<bool(const Resource&)>& pred) const;
+
+    // Q13: Persistence (Save & Load)
+    void save(std::ostream& os) const;
+    void saveToFile(const std::string& filename) const;
+    void load(std::istream& is);
+    void loadFromFile(const std::string& filename);
 
 private:
     struct Entry {

@@ -35,4 +35,16 @@ public:
     using LibraryError::LibraryError;
 };
 
+// Thrown when a lending or session operation is invalid.
+class LendingError : public LibraryError {
+public:
+    using LibraryError::LibraryError;
+};
+
+// Thrown when no print copies or electronic seats are available.
+class UnavailableError : public LendingError {
+public:
+    using LendingError::LendingError;
+};
+
 }  // namespace bookmgmt

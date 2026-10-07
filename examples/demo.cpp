@@ -275,5 +275,73 @@ int main() {
     vendorAcq.printReport(std::cout);
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ── Q13: Search & Persistence demonstration ──────────────────────────────
+    std::cout << "\n=== Q13: Catalog Searches & Persistence Demo ===\n";
+
+    std::cout << "\n-- Search by Author ('Stroustrup') --\n";
+    for (const Resource* r : catalog.searchAuthor("Stroustrup")) {
+        std::cout << "  Found: [" << r->id() << "] " << r->title() << "\n";
+    }
+
+    std::cout << "\n-- Search by ISBN/ISSN ('978-0132350884' or '2045') --\n";
+    for (const Resource* r : catalog.searchIsbnIssn("0132350884")) {
+        std::cout << "  Found ISBN: [" << r->id() << "] " << r->title() << "\n";
+    }
+    for (const Resource* r : catalog.searchIsbnIssn("2045")) {
+        std::cout << "  Found ISSN: [" << r->id() << "] " << r->title() << "\n";
+    }
+
+    std::cout << "\n-- Search by Publication Year Range (2010 - 2020) --\n";
+    for (const Resource* r : catalog.searchYearRange(2010, 2020)) {
+        std::cout << "  Found: [" << r->id() << "] " << r->title() << " (" << r->year() << ")\n";
+    }
+
+    std::cout << "\n-- Catalog Persistence (Save & Load) --\n";
+    const std::string demoFile = "demo_catalog.txt";
+    catalog.saveToFile(demoFile);
+    std::cout << "Saved catalog with " << catalog.size() << " resources to '" << demoFile << "'.\n";
+
+    Catalog loadedDemoCatalog;
+    loadedDemoCatalog.loadFromFile(demoFile);
+    std::cout << "Successfully loaded " << loadedDemoCatalog.size() << " resources from file:\n";
+    for (const Resource* r : loadedDemoCatalog.all()) {
+        std::cout << "  " << r->summary() << " | Holdings: " << loadedDemoCatalog.holdings(r->id()) << "\n";
+    }
+    std::remove(demoFile.c_str());
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Q14: Lending & Electronic Sessions demonstration ─────────────────────
+    std::cout << "\n=== Q14: Lending & Electronic Sessions Demo ===\n";
+
+    LendingManager lending(catalog);
+
+    std::cout << "Print resource B001 total holdings: " << catalog.holdings("B001")
+              << ", available copies: " << lending.availableCopies("B001") << "\n";
+
+    std::cout << "Patron 'Alice' borrows B001...\n";
+    lending.borrow("Alice", "B001");
+    std::cout << "  -> B001 available copies now: " << lending.availableCopies("B001")
+              << " (Catalog holdings unchanged: " << catalog.holdings("B001") << ")\n";
+
+    std::cout << "Patron 'Bob' borrows B001...\n";
+    lending.borrow("Bob", "B001");
+    std::cout << "  -> B001 available copies now: " << lending.availableCopies("B001") << "\n";
+
+    std::cout << "Patron 'Alice' returns B001...\n";
+    lending.returnResource("Alice", "B001");
+    std::cout << "  -> B001 available copies now: " << lending.availableCopies("B001") << "\n";
+
+    std::cout << "\nElectronic resource R001 licensed seats: " << catalog.holdings("R001")
+              << ", available seats: " << lending.availableSeats("R001") << "\n";
+
+    std::cout << "Patron 'Charlie' opens session on R001...\n";
+    lending.openSession("Charlie", "R001");
+    std::cout << "  -> R001 available seats now: " << lending.availableSeats("R001") << "\n";
+
+    std::cout << "Patron 'Charlie' closes session on R001...\n";
+    lending.closeSession("Charlie", "R001");
+    std::cout << "  -> R001 available seats now: " << lending.availableSeats("R001") << "\n";
+    // ─────────────────────────────────────────────────────────────────────────
+
     return 0;
 }
