@@ -343,5 +343,28 @@ int main() {
     std::cout << "  -> R001 available seats now: " << lending.availableSeats("R001") << "\n";
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ── Q15: Currency Support & Mismatch Detection demonstration ─────────────
+    std::cout << "\n=== Q15: Currency Support Demo ===\n";
+
+    Money inrAmount = Money::of(100, 50); // Default: INR
+    Money usdAmount = Money::of(50, 0, "USD");
+    Money eurAmount = Money::of(75, 20, "EUR");
+
+    std::cout << "Created money values: " << inrAmount << " " << inrAmount.currency()
+              << ", " << usdAmount << " " << usdAmount.currency()
+              << ", " << eurAmount << " " << eurAmount.currency() << "\n";
+
+    std::cout << "Scaling " << usdAmount << " " << usdAmount.currency() << " x 3 = "
+              << (usdAmount * 3) << " " << (usdAmount * 3).currency() << "\n";
+
+    std::cout << "Attempting to add " << inrAmount.currency() << " and " << usdAmount.currency() << "...\n";
+    try {
+        Money sum = inrAmount + usdAmount;
+        (void)sum;
+    } catch (const CurrencyMismatchError& e) {
+        std::cout << "  -> CurrencyMismatchError caught: " << e.what() << "\n";
+    }
+    // ─────────────────────────────────────────────────────────────────────────
+
     return 0;
 }

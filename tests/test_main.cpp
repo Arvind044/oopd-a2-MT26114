@@ -1063,6 +1063,102 @@ static void testLending() {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Q15 tests ────────────────────────────────────────────────────────────────
+static void testCurrency() {
+    // 1. Default currency (INR) & zero construction
+    Money mDefault;
+    CHECK(mDefault.currency() == "INR");
+    CHECK(mDefault.minorUnits() == 0);
+    CHECK(mDefault.isZero());
+
+    Money mOfDefault = Money::of(50, 25);
+    CHECK(mOfDefault.currency() == "INR");
+    CHECK(mOfDefault.minorUnits() == 5025);
+
+    Money mMinorDefault = Money::fromMinor(1200);
+    CHECK(mMinorDefault.currency() == "INR");
+    CHECK(mMinorDefault.minorUnits() == 1200);
+
+    // 2. Explicit currencies (USD, EUR, GBP)
+    Money mUsd = Money::of(100, 50, "USD");
+    CHECK(mUsd.currency() == "USD");
+    CHECK(mUsd.minorUnits() == 10050);
+
+    Money mEur = Money::fromMinor(2000, "EUR");
+    CHECK(mEur.currency() == "EUR");
+    CHECK(mEur.minorUnits() == 2000);
+
+    Money mGbp = Money::of(45, 0, "GBP");
+    CHECK(mGbp.currency() == "GBP");
+    CHECK(mGbp.minorUnits() == 4500);
+
+    // 3. Same-currency arithmetic & comparisons
+    Money usd1 = Money::of(10, 50, "USD");
+    Money usd2 = Money::of(5, 25, "USD");
+    Money usdSum = usd1 + usd2;
+    CHECK(usdSum.currency() == "USD");
+    CHECK(usdSum == Money::of(15, 75, "USD"));
+
+    Money usdDiff = usd1 - usd2;
+    CHECK(usdDiff.currency() == "USD");
+    CHECK(usdDiff == Money::of(5, 25, "USD"));
+
+    Money usdCompound = usd1;
+    usdCompound += usd2;
+    CHECK(usdCompound == Money::of(15, 75, "USD"));
+    usdCompound -= usd2;
+    CHECK(usdCompound == usd1);
+
+    CHECK(usd2 < usd1);
+    CHECK(usd2 <= usd1);
+    CHECK(usd1 > usd2);
+    CHECK(usd1 >= usd2);
+    CHECK(usd1 == usd1);
+    CHECK(usd1 != usd2);
+
+    // 4. Scalar multiplication preserving currency
+    Money eur = Money::of(25, 50, "EUR");
+    Money scaled1 = eur * 3;
+    CHECK(scaled1.currency() == "EUR");
+    CHECK(scaled1 == Money::of(76, 50, "EUR"));
+
+    Money scaled2 = 2 * eur;
+    CHECK(scaled2.currency() == "EUR");
+    CHECK(scaled2 == Money::of(51, 0, "EUR"));
+
+    Money eurCompound = eur;
+    eurCompound *= 4;
+    CHECK(eurCompound.currency() == "EUR");
+    CHECK(eurCompound == Money::of(102, 0, "EUR"));
+
+    // 5. Mismatched currency arithmetic (throws CurrencyMismatchError)
+    Money inr = Money::of(100, 0, "INR");
+    Money usd = Money::of(100, 0, "USD");
+
+    CHECK_THROWS(inr + usd, CurrencyMismatchError);
+    CHECK_THROWS(usd + inr, CurrencyMismatchError);
+    CHECK_THROWS(inr - usd, CurrencyMismatchError);
+    CHECK_THROWS(usd - inr, CurrencyMismatchError);
+
+    Money inrMut = inr;
+    CHECK_THROWS(inrMut += usd, CurrencyMismatchError);
+    CHECK_THROWS(inrMut -= usd, CurrencyMismatchError);
+    CHECK(inrMut == inr); // State unchanged on failure
+
+    // 6. Mismatched currency comparisons (throws CurrencyMismatchError for ALL comparisons)
+    CHECK_THROWS(inr == usd, CurrencyMismatchError);
+    CHECK_THROWS(inr != usd, CurrencyMismatchError);
+    CHECK_THROWS(inr < usd, CurrencyMismatchError);
+    CHECK_THROWS(inr <= usd, CurrencyMismatchError);
+    CHECK_THROWS(inr > usd, CurrencyMismatchError);
+    CHECK_THROWS(inr >= usd, CurrencyMismatchError);
+
+    // 7. Empty currency rejection
+    CHECK_THROWS(Money::of(10, 0, ""), std::invalid_argument);
+    CHECK_THROWS(Money::fromMinor(100, ""), std::invalid_argument);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 int main() {
     testMoney();
     testResourcesAndCost();
@@ -1082,6 +1178,7 @@ int main() {
     testVendorPricing();
     testCatalogSearchesAndPersistence();
     testLending();
+    testCurrency();
     std::cout << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";
     return g_failures == 0 ? 0 : 1;
 }

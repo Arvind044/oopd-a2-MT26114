@@ -47,4 +47,12 @@ public:
     using LendingError::LendingError;
 };
 
+// Thrown when an operation involves incompatible currencies.
+class CurrencyMismatchError : public LibraryError {
+public:
+    CurrencyMismatchError(const std::string& c1, const std::string& c2)
+        : LibraryError("currency mismatch: " + c1 + " vs " + c2) {}
+    using LibraryError::LibraryError;
+};
+
 }  // namespace bookmgmt
