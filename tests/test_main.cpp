@@ -609,6 +609,145 @@ static void testRollover() {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Q11 tests ────────────────────────────────────────────────────────────────
+static void testAllOrNothingBatch() {
+    Catalog cat;
+    cat.emplace<Book>("AON1", "Book 1", std::vector<std::string>{"Author"},
+                      "isbn-1", "Pub", 2024, Money::of(100));
+    cat.emplace<Book>("AON2", "Book 2", std::vector<std::string>{"Author"},
+                      "isbn-2", "Pub", 2024, Money::of(150));
+    cat.emplace<Book>("AON3", "Book 3", std::vector<std::string>{"Author"},
+                      "isbn-3", "Pub", 2024, Money::of(200));
+
+    Budget b(Money::of(1000));
+    b.setQuota(ResourceCategory::Book, {5, Money::of(600)});
+
+    AcquisitionManager acq(cat, b);
+
+    // 1. Successful all-or-nothing batch
+    auto resSuccess = acq.processBatch({{"AON1", 2}, {"AON2", 1}}, true);
+    CHECK(resSuccess.size() == 2);
+    CHECK(resSuccess[0].approved);
+    CHECK(resSuccess[1].approved);
+    CHECK(b.spent() == Money::of(350));
+    CHECK(cat.holdings("AON1") == 2);
+    CHECK(cat.holdings("AON2") == 1);
+    CHECK(acq.history().size() == 2);
+
+    // 2. Failure on the first request (unknown resource)
+    const size_t histBefore1 = acq.history().size();
+    const Money spentBefore1 = b.spent();
+    auto resFailFirst = acq.processBatch({{"INVALID", 1}, {"AON1", 1}}, true);
+    CHECK(resFailFirst.size() == 2);
+    CHECK(!resFailFirst[0].approved);
+    CHECK(b.spent() == spentBefore1);
+    CHECK(acq.history().size() == histBefore1); // state & history unchanged
+
+    // 3. Failure on a later request (unit quota exceeded)
+    const size_t histBefore2 = acq.history().size();
+    const Money spentBefore2 = b.spent();
+    // AON1 already has 2 holdings. Unit quota is 5 max.
+    // Batch: AON1 x2 (ok, 4 total) then AON1 x2 (exceeds 5 max -> fails)
+    auto resFailLater = acq.processBatch({{"AON1", 2}, {"AON1", 2}}, true);
+    CHECK(resFailLater.size() == 2);
+    CHECK(resFailLater[0].approved);  // simulation approved 1st
+    CHECK(!resFailLater[1].approved); // simulation rejected 2nd
+    CHECK(b.spent() == spentBefore2);
+    CHECK(cat.holdings("AON1") == 2);  // holdings unchanged
+    CHECK(acq.history().size() == histBefore2); // history unchanged
+
+    // 4. Cumulative budget failure
+    // Current spent = 350, max spend quota = 600. Remaining spend = 250.
+    // Request 1: AON1 x1 (100) -> sim spent 450 (ok)
+    // Request 2: AON3 x1 (200) -> sim spent 650 > 600 (fails!)
+    auto resFailCumulative = acq.processBatch({{"AON1", 1}, {"AON3", 1}}, true);
+    CHECK(resFailCumulative.size() == 2);
+    CHECK(resFailCumulative[0].approved);
+    CHECK(!resFailCumulative[1].approved);
+    CHECK(b.spent() == Money::of(350)); // state unchanged
+
+    // 5. Existing non-all-or-nothing behavior still works (default allOrNothing = false)
+    auto resStandard = acq.processBatch({{"AON1", 1}, {"AON3", 1}});
+    CHECK(resStandard.size() == 2);
+    CHECK(resStandard[0].approved);   // 100 spent -> OK (total spent 450)
+    CHECK(!resStandard[1].approved);  // 200 spent -> rejected (450+200=650 > 600)
+    CHECK(b.spent() == Money::of(450)); // first request committed, second failed
+    CHECK(acq.history().size() == histBefore2 + 2); // history updated for non-all-or-nothing
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Q12 tests ────────────────────────────────────────────────────────────────
+static void testVendorPricing() {
+    Catalog cat;
+    cat.emplace<Book>("V1", "Vendor Book 1", std::vector<std::string>{"Author"},
+                      "isbn-v1", "Pub", 2024, Money::of(100)); // Default price 100
+    cat.emplace<Book>("V2", "Vendor Book 2", std::vector<std::string>{"Author"},
+                      "isbn-v2", "Pub", 2024, Money::of(200)); // Default price 200
+
+    Budget b(Money::of(2000));
+    AcquisitionManager acq(cat, b);
+
+    // 1. No vendors registered -> preserves old behavior
+    const auto& recNoVendor = acq.purchase("V1", 1);
+    CHECK(recNoVendor.cost == Money::of(100));
+    CHECK(recNoVendor.vendor.empty());
+
+    // 2. One vendor registered
+    acq.addVendorPrice("V1", "BookDepot", Money::of(80));
+    CHECK(acq.quote("V1", 1) == Money::of(80));
+    const auto& recOneVendor = acq.purchase("V1", 1);
+    CHECK(recOneVendor.cost == Money::of(80));
+    CHECK(recOneVendor.vendor == "BookDepot");
+
+    // 3. Multiple vendors registered (cheapest selected, expensive ignored)
+    acq.addVendorPrice("V2", "ExpensiveVendor", Money::of(250));
+    acq.addVendorPrice("V2", "CheapestVendor", Money::of(120));
+    acq.addVendorPrice("V2", "MidVendor", Money::of(180));
+
+    CHECK(acq.quote("V2", 1) == Money::of(120));
+    const auto& recMulti = acq.purchase("V2", 2); // 2 x 120 = 240
+    CHECK(recMulti.cost == Money::of(240));
+    CHECK(recMulti.vendor == "CheapestVendor");
+
+    // 4. Equal-price deterministic tie-breaking (lexicographical order)
+    cat.emplace<Book>("V3", "Equal Price Book", std::vector<std::string>{"Author"},
+                      "isbn-v3", "Pub", 2024, Money::of(500));
+    acq.addVendorPrice("V3", "ZebraBooks", Money::of(300));
+    acq.addVendorPrice("V3", "AlphaBooks", Money::of(300));
+
+    const auto& recTie = acq.purchase("V3", 1);
+    CHECK(recTie.cost == Money::of(300));
+    CHECK(recTie.vendor == "AlphaBooks"); // "AlphaBooks" < "ZebraBooks"
+
+    // 5. Q11 all-or-nothing batch uses vendor pricing correctly
+    Catalog catAON;
+    catAON.emplace<Book>("VA1", "AON Vendor Book", std::vector<std::string>{"Author"},
+                         "isbn-va1", "Pub", 2024, Money::of(500));
+    Budget bAON(Money::of(300)); // Budget = 300
+    AcquisitionManager acqAON(catAON, bAON);
+
+    // Without vendor price, cost is 500 > 300 (fails)
+    std::string reason;
+    CHECK(!acqAON.canPurchase("VA1", 1, &reason));
+
+    // Register vendor offering price of 250 (fits within budget of 300)
+    acqAON.addVendorPrice("VA1", "DiscountVendor", Money::of(250));
+    CHECK(acqAON.canPurchase("VA1", 1, &reason));
+
+    // All-or-nothing batch succeeds using vendor price
+    auto aonRes = acqAON.processBatch({{"VA1", 1}}, true);
+    CHECK(aonRes.size() == 1);
+    CHECK(aonRes[0].approved);
+    CHECK(aonRes[0].cost == Money::of(250));
+    CHECK(aonRes[0].vendor == "DiscountVendor");
+    CHECK(bAON.spent() == Money::of(250));
+
+    // Error handling on invalid addVendorPrice calls
+    CHECK_THROWS(acq.addVendorPrice("V1", "", Money::of(10)), std::invalid_argument);
+    CHECK_THROWS(acq.addVendorPrice("V1", "Vendor", Money::of(-10)), std::invalid_argument);
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 int main() {
     testMoney();
     testResourcesAndCost();
@@ -624,6 +763,8 @@ int main() {
     testCancellation();
     testDepartmentBudgets();
     testRollover();
+    testAllOrNothingBatch();
+    testVendorPricing();
     std::cout << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";
     return g_failures == 0 ? 0 : 1;
 }

@@ -247,5 +247,33 @@ int main() {
     nextYearBudget.print(std::cout);
     // ─────────────────────────────────────────────────────────────────────────
 
+    // ── Q12: Vendor Selection demonstration ──────────────────────────────────
+    std::cout << "\n=== Q12: Vendor Selection Demo ===\n";
+
+    Catalog vendorCatalog;
+    vendorCatalog.emplace<Book>("V001", "Introduction to Algorithms",
+        std::vector<std::string>{"Cormen"}, "978-0262033848", "MIT Press", 2009, Money::of(800));
+
+    Budget vendorBudget(Money::of(10000));
+    AcquisitionManager vendorAcq(vendorCatalog, vendorBudget);
+
+    std::cout << "Default quote for V001 (no vendors registered): " << vendorAcq.quote("V001", 1) << "\n";
+
+    vendorAcq.addVendorPrice("V001", "VendorAlpha", Money::of(750));
+    vendorAcq.addVendorPrice("V001", "VendorBeta", Money::of(650));
+    vendorAcq.addVendorPrice("V001", "VendorGamma", Money::of(700));
+
+    std::cout << "Quote for V001 after adding 3 vendors (650, 700, 750): "
+              << vendorAcq.quote("V001", 1) << " (cheapest vendor selected)\n";
+
+    const auto& vendorRec = vendorAcq.purchase("V001", 2);
+    std::cout << "Purchased 2 copies. Order #" << vendorRec.orderNo
+              << ", cost = " << vendorRec.cost
+              << ", vendor = " << vendorRec.vendor << "\n";
+
+    std::cout << "\n=== Vendor Acquisition Report ===\n";
+    vendorAcq.printReport(std::cout);
+    // ─────────────────────────────────────────────────────────────────────────
+
     return 0;
 }

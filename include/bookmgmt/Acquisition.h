@@ -29,6 +29,7 @@ struct PurchaseRecord {
     std::string reason;  // why it was rejected; empty if approved
     bool cancelled = false; // Q8: set to true if this order was cancelled
     std::string department; // Q9: department charged
+    std::string vendor;     // Q12: vendor selected (empty if using default pricing)
 };
 
 class AcquisitionManager {
@@ -39,6 +40,9 @@ public:
 
     // Q9: Register a department-specific budget
     void setDepartmentBudget(const std::string& dept, Budget budget);
+
+    // Q12: Register a vendor's unit price for a resource
+    void addVendorPrice(const std::string& resourceId, const std::string& vendorName, Money unitPrice);
 
     // Price of a request without buying anything. Throws NotFoundError.
     Money quote(const std::string& id, int quantity) const;
@@ -56,8 +60,9 @@ public:
 
     // Processes requests in order; each is approved or rejected on its own
     // (never throws for a rejected request). Every outcome is recorded.
-    // EXTENSION POINT: priority ordering, all-or-nothing batches, ...
-    std::vector<PurchaseRecord> processBatch(const std::vector<PurchaseRequest>& reqs);
+    // Q11: If allOrNothing is true, buys all requests if all can succeed; otherwise buys none.
+    std::vector<PurchaseRecord> processBatch(const std::vector<PurchaseRequest>& reqs,
+                                             bool allOrNothing = false);
 
     // Q8: Cancels an approved order: refunds budget & quota, reduces holdings,
     // marks original record as cancelled, and appends a cancellation record.
@@ -72,11 +77,25 @@ public:
     void printReport(std::ostream& os) const;
 
 private:
+    struct VendorOffer {
+        std::string vendorName;
+        Money unitPrice;
+    };
+
+    struct SelectedVendorInfo {
+        std::string vendorName;
+        Money preTaxCost;
+        Money postTaxCost;
+    };
+
+    SelectedVendorInfo selectVendor(const Resource& r, int quantity) const;
+
     Money applyTax(const Resource& r, Money preTaxCost) const;
     PurchaseRecord& record(const Resource* r, const std::string& id, int qty,
                         Money preTaxCost, Money postTaxCost,
                         bool approved, std::string reason,
-                        const std::string& dept = "");
+                        const std::string& dept = "",
+                        const std::string& vendor = "");
 
     const Budget& getBudgetFor(const std::string& dept) const;
     Budget& getBudgetFor(const std::string& dept);
@@ -84,6 +103,7 @@ private:
     Catalog& catalog_;
     Budget& budget_;
     std::map<std::string, Budget> departmentBudgets_;
+    std::map<std::string, std::vector<VendorOffer>> vendorPrices_;
     int printTaxPercent_ = 0;
     int electronicTaxPercent_ = 0;
     std::vector<PurchaseRecord> history_;

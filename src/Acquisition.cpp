@@ -12,8 +12,10 @@ AcquisitionManager::AcquisitionManager(Catalog& catalog, Budget& budget)
     : catalog_(catalog), budget_(budget) {}
 
 Money AcquisitionManager::quote(const std::string& id, int quantity) const {
-    return catalog_.get(id).costFor(quantity);
+    const Resource& r = catalog_.get(id);
+    return selectVendor(r, quantity).preTaxCost;
 }
+
 void AcquisitionManager::setTaxRates(int printPercent, int electronicPercent) {
     if (printPercent < 0 || electronicPercent < 0) {
         throw std::invalid_argument("tax rates must not be negative");
@@ -22,6 +24,61 @@ void AcquisitionManager::setTaxRates(int printPercent, int electronicPercent) {
     printTaxPercent_ = printPercent;
     electronicTaxPercent_ = electronicPercent;
 }
+
+namespace {
+struct TemporaryUnitPrice {
+    Resource& resource;
+    Money originalPrice;
+
+    TemporaryUnitPrice(Resource& r, Money tempPrice)
+        : resource(r), originalPrice(r.unitPrice()) {
+        resource.setUnitPrice(tempPrice);
+    }
+    ~TemporaryUnitPrice() {
+        resource.setUnitPrice(originalPrice);
+    }
+};
+}  // namespace
+
+void AcquisitionManager::addVendorPrice(const std::string& resourceId,
+                                         const std::string& vendorName,
+                                         Money unitPrice) {
+    if (vendorName.empty()) throw std::invalid_argument("vendor name must not be empty");
+    if (unitPrice.isNegative()) throw std::invalid_argument("vendor price must not be negative");
+    vendorPrices_[resourceId].push_back(VendorOffer{vendorName, unitPrice});
+}
+
+AcquisitionManager::SelectedVendorInfo AcquisitionManager::selectVendor(const Resource& r, int quantity) const {
+    auto it = vendorPrices_.find(r.id());
+    if (it == vendorPrices_.end() || it->second.empty()) {
+        const Money preTax = r.costFor(quantity);
+        const Money postTax = applyTax(r, preTax);
+        return SelectedVendorInfo{"", preTax, postTax};
+    }
+
+    SelectedVendorInfo best;
+    bool first = true;
+    Resource& mutableR = const_cast<Resource&>(r);
+
+    for (const auto& offer : it->second) {
+        Money preTax;
+        {
+            TemporaryUnitPrice guard(mutableR, offer.unitPrice);
+            preTax = mutableR.costFor(quantity);
+        }
+        Money postTax = applyTax(r, preTax);
+
+        if (first || postTax < best.postTaxCost ||
+            (postTax == best.postTaxCost && offer.vendorName < best.vendorName)) {
+            best.vendorName = offer.vendorName;
+            best.preTaxCost = preTax;
+            best.postTaxCost = postTax;
+            first = false;
+        }
+    }
+    return best;
+}
+
 Money AcquisitionManager::applyTax(const Resource& r, Money preTaxCost) const {
     const int rate = r.isDigital() ? electronicTaxPercent_ : printTaxPercent_;
 
@@ -60,10 +117,9 @@ bool AcquisitionManager::canPurchase(const std::string& id, int quantity,
         if (quantity <= 0) {
             why = "quantity must be positive";
         } else {
-            const Money preTaxCost = r->costFor(quantity);
-            const Money postTaxCost = applyTax(*r, preTaxCost);
+            SelectedVendorInfo vInfo = selectVendor(*r, quantity);
             const Budget& b = getBudgetFor(dept);
-            why = b.check(r->category(), quantity, postTaxCost);
+            why = b.check(r->category(), quantity, vInfo.postTaxCost);
             if (why.empty())
                 why = budget_.checkTitle(r->category(), r->title()); // Q7
         }
@@ -82,36 +138,116 @@ PurchaseRecord& AcquisitionManager::record(const Resource* r, const std::string&
                                            int qty, Money preTaxCost,
                                            Money postTaxCost, bool approved,
                                            std::string reason,
-                                           const std::string& dept) {
+                                           const std::string& dept,
+                                           const std::string& vendor) {
     history_.push_back(PurchaseRecord{
     nextOrderNo_++, id, r ? r->title() : std::string("(unknown)"),
     r ? r->category() : ResourceCategory::Book, qty,
     preTaxCost, postTaxCost, approved,
-    std::move(reason), false /* cancelled */, dept});
+    std::move(reason), false /* cancelled */, dept, vendor});
     return history_.back();
 }
 
 const PurchaseRecord& AcquisitionManager::purchase(const std::string& id, int quantity,
                                                const std::string& dept) {
     const Resource& r = catalog_.get(id);        // may throw NotFoundError
-    
-    const Money preTaxCost = r.costFor(quantity); // may throw invalid_argument
-    const Money postTaxCost = applyTax(r, preTaxCost);
+    if (quantity <= 0) throw std::invalid_argument("quantity must be positive");
+
+    SelectedVendorInfo vInfo = selectVendor(r, quantity);
 
     // Q7: check title quota before touching any state
     const std::string titleWhy = budget_.checkTitle(r.category(), r.title());
     if (!titleWhy.empty()) throw QuotaExceededError(titleWhy);
 
     Budget& b = getBudgetFor(dept);
-    b.commit(r.category(), quantity, postTaxCost);  // post-tax cost
+    b.commit(r.category(), quantity, vInfo.postTaxCost);  // post-tax cost
     catalog_.addHoldings(id, quantity);
     budget_.addTitle(r.category(), r.title()); // Q7: record after success
 
-    return record(&r, id, quantity, preTaxCost, postTaxCost, true, {}, dept);
+    return record(&r, id, quantity, vInfo.preTaxCost, vInfo.postTaxCost, true, {}, dept, vInfo.vendorName);
 }
 
 std::vector<PurchaseRecord> AcquisitionManager::processBatch(
-    const std::vector<PurchaseRequest>& reqs) {
+    const std::vector<PurchaseRequest>& reqs, bool allOrNothing) {
+    if (allOrNothing) {
+        std::map<std::string, Budget> simDepts = departmentBudgets_;
+        Budget simDefault = budget_;
+        bool allPass = true;
+
+        std::vector<PurchaseRecord> simResults;
+        simResults.reserve(reqs.size());
+        int simOrderNo = nextOrderNo_;
+
+        for (const auto& req : reqs) {
+            const Resource* r = catalog_.find(req.resourceId);
+            Money preTaxCost;
+            Money postTaxCost;
+            std::string why;
+            std::string vendorName;
+
+            if (!r) {
+                why = "resource not found: " + req.resourceId;
+            } else if (req.quantity <= 0) {
+                why = "quantity must be positive";
+            } else {
+                SelectedVendorInfo vInfo = selectVendor(*r, req.quantity);
+                preTaxCost = vInfo.preTaxCost;
+                postTaxCost = vInfo.postTaxCost;
+                vendorName = vInfo.vendorName;
+
+                Budget* b = &simDefault;
+                if (!req.department.empty()) {
+                    auto it = simDepts.find(req.department);
+                    if (it != simDepts.end()) {
+                        b = &it->second;
+                    }
+                }
+
+                why = b->check(r->category(), req.quantity, postTaxCost);
+                if (why.empty()) {
+                    why = simDefault.checkTitle(r->category(), r->title());
+                }
+            }
+
+            if (why.empty()) {
+                Budget* b = &simDefault;
+                if (!req.department.empty()) {
+                    auto it = simDepts.find(req.department);
+                    if (it != simDepts.end()) {
+                        b = &it->second;
+                    }
+                }
+                b->commit(r->category(), req.quantity, postTaxCost);
+                simDefault.addTitle(r->category(), r->title());
+
+                simResults.push_back(PurchaseRecord{
+                    simOrderNo++, req.resourceId, r->title(), r->category(),
+                    req.quantity, preTaxCost, postTaxCost, true, "", false, req.department, vendorName
+                });
+            } else {
+                allPass = false;
+                simResults.push_back(PurchaseRecord{
+                    simOrderNo++, req.resourceId, r ? r->title() : std::string("(unknown)"),
+                    r ? r->category() : ResourceCategory::Book, req.quantity,
+                    preTaxCost, postTaxCost, false, why, false, req.department, vendorName
+                });
+            }
+        }
+
+        if (!allPass) {
+            // Any rejection -> execute none, state and history remain unchanged
+            return simResults;
+        }
+
+        // All succeeded -> execute all for real
+        std::vector<PurchaseRecord> realResults;
+        realResults.reserve(reqs.size());
+        for (const auto& req : reqs) {
+            realResults.push_back(purchase(req.resourceId, req.quantity, req.department));
+        }
+        return realResults;
+    }
+
     std::vector<PurchaseRecord> results;
     results.reserve(reqs.size());
     for (const auto& req : reqs) {
@@ -119,13 +255,16 @@ std::vector<PurchaseRecord> AcquisitionManager::processBatch(
         Money preTaxCost;
         Money postTaxCost;
         std::string why;
+        std::string vendorName;
         if (!r) {
             why = "resource not found: " + req.resourceId;
         } else if (req.quantity <= 0) {
             why = "quantity must be positive";
         } else {
-            preTaxCost = r->costFor(req.quantity);
-            postTaxCost = applyTax(*r, preTaxCost);
+            SelectedVendorInfo vInfo = selectVendor(*r, req.quantity);
+            preTaxCost = vInfo.preTaxCost;
+            postTaxCost = vInfo.postTaxCost;
+            vendorName = vInfo.vendorName;
             const Budget& b = getBudgetFor(req.department);
             why = b.check(r->category(), req.quantity, postTaxCost);
             if (why.empty())
@@ -136,7 +275,7 @@ std::vector<PurchaseRecord> AcquisitionManager::processBatch(
             results.push_back(purchase(req.resourceId, req.quantity, req.department));
         } else {
            results.push_back(record(r, req.resourceId, req.quantity,
-                         preTaxCost, postTaxCost, false, why, req.department));
+                         preTaxCost, postTaxCost, false, why, req.department, vendorName));
         }
     }
     return results;
@@ -201,6 +340,9 @@ void AcquisitionManager::printReport(std::ostream& os) const {
            << rec.title;
         if (!rec.department.empty()) {
             os << "  [" << rec.department << "]";
+        }
+        if (!rec.vendor.empty()) {
+            os << "  [vendor: " << rec.vendor << "]";
         }
         if (!rec.reason.empty()) os << "\n        reason: " << rec.reason;
         os << "\n";
