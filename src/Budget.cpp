@@ -64,15 +64,21 @@ Budget::Failure Budget::evaluate(ResourceCategory c, int units, Money cost,
         why = "cost must not be negative";
         return Failure::BadInput;
     }
-    if (auto left = unitsRemaining(c); left && units > *left) {
-        why = std::string(categoryName(c)) + " unit quota exceeded: requested " +
-              std::to_string(units) + ", " + std::to_string(*left) + " remaining";
-        return Failure::Quota;
+    {
+        auto left = unitsRemaining(c);
+        if (left && units > *left) {
+            why = std::string(categoryName(c)) + " unit quota exceeded: requested " +
+                  std::to_string(units) + ", " + std::to_string(*left) + " remaining";
+            return Failure::Quota;
+        }
     }
-    if (auto left = spendRemaining(c); left && cost > *left) {
-        why = std::string(categoryName(c)) + " spend quota exceeded: cost " +
-              cost.toString() + ", " + left->toString() + " remaining";
-        return Failure::Quota;
+    {
+        auto left = spendRemaining(c);
+        if (left && cost > *left) {
+            why = std::string(categoryName(c)) + " spend quota exceeded: cost " +
+                  cost.toString() + ", " + left->toString() + " remaining";
+            return Failure::Quota;
+        }
     }
     if (cost > remaining()) {
         why = "overall budget exceeded: cost " + cost.toString() + ", " +
@@ -82,6 +88,30 @@ Budget::Failure Budget::evaluate(ResourceCategory c, int units, Money cost,
     why.clear();
     return Failure::None;
 }
+
+// ── Q7: title quota ──────────────────────────────────────────────────────────
+void Budget::setTitleQuota(ResourceCategory c, int maxTitles) {
+    // Creates a default quota entry if none exists, then sets the title limit.
+    quotas_[c].maxTitles = maxTitles;
+}
+
+std::string Budget::checkTitle(ResourceCategory c, const std::string& title) const {
+    auto q = quotaFor(c);
+    if (!q || q->maxTitles == 0) return "";          // no limit set
+    const Usage& u = usageFor(c);
+    if (u.titles.count(title)) return "";             // already known title
+    if (static_cast<int>(u.titles.size()) >= q->maxTitles) {
+        return std::string(categoryName(c)) + " title quota exceeded: already have " +
+               std::to_string(u.titles.size()) + " title(s), max " +
+               std::to_string(q->maxTitles);
+    }
+    return "";
+}
+
+void Budget::addTitle(ResourceCategory c, const std::string& title) {
+    usage_[c].titles.insert(title);
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 std::string Budget::check(ResourceCategory c, int units, Money cost) const {
     std::string why;
@@ -101,6 +131,33 @@ void Budget::commit(ResourceCategory c, int units, Money cost) {
     u.units += units;
     u.spent += cost;
     spent_ += cost;
+}
+
+void Budget::revert(ResourceCategory c, int units, Money cost) {
+    Usage& u = usage_[c];
+    u.units -= units;
+    if (u.units < 0) u.units = 0;
+    u.spent -= cost;
+    if (u.spent.isNegative()) u.spent = Money();
+    spent_ -= cost;
+    if (spent_.isNegative()) spent_ = Money();
+}
+
+Budget Budget::rollover(double percent, Money baseBudget) const {
+    if (percent < 0.0 || percent > 100.0) {
+        throw std::invalid_argument("rollover percentage must be between 0 and 100");
+    }
+    if (baseBudget.isNegative()) {
+        throw std::invalid_argument("base budget must not be negative");
+    }
+    const int64_t unspentMinor = remaining().minorUnits();
+    const int64_t carryMinor = static_cast<int64_t>((unspentMinor * percent) / 100.0);
+    const Money carryForward = Money::fromMinor(carryMinor);
+    const Money newTotal = baseBudget + carryForward;
+
+    Budget nextYear(newTotal);
+    nextYear.quotas_ = quotas_; // preserve category quotas
+    return nextYear;
 }
 
 void Budget::print(std::ostream& os) const {

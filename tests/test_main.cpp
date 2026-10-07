@@ -259,7 +259,7 @@ static void testBudget() {
     CHECK(b.spent() == Money::of(300));
     CHECK(*b.unitsRemaining(ResourceCategory::Book) == 1);
     CHECK(*b.spendRemaining(ResourceCategory::Book) == Money::of(100));
-    CHECK(!b.unitsRemaining(ResourceCategory::ElectronicResource).has_value());
+    CHECK(!b.unitsRemaining(ResourceCategory::ElectronicResource));
 
     CHECK_THROWS(b.commit(ResourceCategory::Book, 2, Money::of(10)), QuotaExceededError);
     CHECK_THROWS(b.commit(ResourceCategory::ElectronicResource, 1, Money::of(800)),
@@ -358,6 +358,257 @@ void testTaxes() {
     CHECK(report.str().find("Total post-tax: 460.00") != std::string::npos);
 }
 
+// ── Q7 tests ─────────────────────────────────────────────────────────────────
+static void testTitleQuota() {
+    // --- Budget-level title checks ---
+    Budget b(Money::of(5000));
+    // maxTitles = 2 for Books
+    b.setQuota(ResourceCategory::Book, {10, Money::of(4000), 2});
+
+    // First title: allowed
+    CHECK(b.checkTitle(ResourceCategory::Book, "Alpha").empty());
+    b.addTitle(ResourceCategory::Book, "Alpha");
+
+    // Same title again: still allowed (not a new slot)
+    CHECK(b.checkTitle(ResourceCategory::Book, "Alpha").empty());
+
+    // Second distinct title: allowed
+    CHECK(b.checkTitle(ResourceCategory::Book, "Beta").empty());
+    b.addTitle(ResourceCategory::Book, "Beta");
+
+    // Third distinct title: must be rejected
+    CHECK(!b.checkTitle(ResourceCategory::Book, "Gamma").empty());
+
+    // maxTitles = 0 means unlimited
+    Budget b2(Money::of(5000));
+    b2.setQuota(ResourceCategory::Book, {10, Money::of(4000), 0});
+    b2.addTitle(ResourceCategory::Book, "X");
+    b2.addTitle(ResourceCategory::Book, "Y");
+    b2.addTitle(ResourceCategory::Book, "Z");
+    CHECK(b2.checkTitle(ResourceCategory::Book, "W").empty());
+
+    // No quota set → unlimited (checkTitle returns "")
+    Budget b3(Money::of(5000));
+    CHECK(b3.checkTitle(ResourceCategory::Book, "AnyTitle").empty());
+
+    // --- AcquisitionManager-level title checks ---
+    Catalog cat;
+    cat.emplace<Book>("TQ1", "TitleA", std::vector<std::string>{"Author"},
+                      "isbn1", "Pub", 2024, Money::of(50));
+    cat.emplace<Book>("TQ2", "TitleB", std::vector<std::string>{"Author"},
+                      "isbn2", "Pub", 2024, Money::of(50));
+    cat.emplace<Book>("TQ3", "TitleC", std::vector<std::string>{"Author"},
+                      "isbn3", "Pub", 2024, Money::of(50));
+
+    Budget bAcq(Money::of(10000));
+    bAcq.setQuota(ResourceCategory::Book, {20, Money::of(9000), 2}); // max 2 titles
+    AcquisitionManager acq(cat, bAcq);
+
+    // First purchase of TitleA — OK
+    CHECK(acq.purchase("TQ1", 1).approved);
+
+    // Second purchase of same title (TitleA) — OK (existing title)
+    CHECK(acq.purchase("TQ1", 1).approved);
+
+    // Purchase of TitleB — OK (2nd distinct title)
+    CHECK(acq.purchase("TQ2", 1).approved);
+
+    // canPurchase TitleC — must be rejected
+    std::string reason;
+    CHECK(!acq.canPurchase("TQ3", 1, &reason));
+    CHECK(reason.find("title quota") != std::string::npos);
+
+    // purchase TitleC — must throw QuotaExceededError, state unchanged
+    const Money spentBefore = bAcq.spent();
+    const int holdingsBefore = cat.holdings("TQ3");
+    CHECK_THROWS(acq.purchase("TQ3", 1), QuotaExceededError);
+    CHECK(bAcq.spent() == spentBefore);
+    CHECK(cat.holdings("TQ3") == holdingsBefore);
+
+    // processBatch: TitleC must be rejected in batch too
+    auto results = acq.processBatch({{"TQ3", 1}});
+    CHECK(results.size() == 1);
+    CHECK(!results[0].approved);
+    CHECK(results[0].reason.find("title quota") != std::string::npos);
+
+    // setTitleQuota convenience wrapper
+    Budget b4(Money::of(5000));
+    b4.setQuota(ResourceCategory::Book, {10, Money::of(4000)});
+    b4.setTitleQuota(ResourceCategory::Book, 1);
+    b4.addTitle(ResourceCategory::Book, "OnlyOne");
+    CHECK(!b4.checkTitle(ResourceCategory::Book, "Another").empty());
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Q8 tests ─────────────────────────────────────────────────────────────────
+static void testCancellation() {
+    Catalog cat;
+    cat.emplace<Book>("CB1", "Cancel Book", std::vector<std::string>{"Author"},
+                      "isbn-c", "Pub", 2024, Money::of(100));
+
+    Budget b(Money::of(1000));
+    b.setQuota(ResourceCategory::Book, {5, Money::of(500)});
+
+    AcquisitionManager acq(cat, b);
+
+    // Purchase order #1: 3 copies for Money::of(300)
+    const auto& rec1 = acq.purchase("CB1", 3);
+    CHECK(rec1.orderNo == 1);
+    CHECK(rec1.approved);
+    CHECK(!rec1.cancelled);
+    CHECK(cat.holdings("CB1") == 3);
+    CHECK(b.spent() == Money::of(300));
+    CHECK(acq.totalSpent() == Money::of(300));
+    CHECK(*b.unitsRemaining(ResourceCategory::Book) == 2);
+
+    // Cancel order #1: should succeed
+    CHECK(acq.cancel(1));
+
+    // Verify original record is updated to cancelled=true
+    CHECK(acq.history()[0].cancelled);
+
+    // Verify holdings, budget spent, and totalSpent are reverted
+    CHECK(cat.holdings("CB1") == 0);
+    CHECK(b.spent() == Money::of(0));
+    CHECK(acq.totalSpent() == Money::of(0));
+    CHECK(*b.unitsRemaining(ResourceCategory::Book) == 5);
+
+    // Verify history now has 2 records: original cancelled + separate cancellation record
+    CHECK(acq.history().size() == 2);
+    CHECK(acq.history()[1].orderNo == 2);
+    CHECK(!acq.history()[1].approved);
+    CHECK(acq.history()[1].reason.find("Cancelled order #1") != std::string::npos);
+
+    // Attempting to cancel order #1 again must fail (already cancelled)
+    CHECK(!acq.cancel(1));
+
+    // Attempting to cancel non-existent order #999 must fail
+    CHECK(!acq.cancel(999));
+
+    // Attempting to cancel a rejected order must fail
+    auto batchRes = acq.processBatch({{"CB1", 10}}); // exceeds unit quota (5 max)
+    CHECK(batchRes.size() == 1);
+    CHECK(!batchRes[0].approved);
+    int rejectedOrderNo = batchRes[0].orderNo;
+    CHECK(!acq.cancel(rejectedOrderNo));
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Q9 tests ─────────────────────────────────────────────────────────────────
+static void testDepartmentBudgets() {
+    Catalog cat;
+    cat.emplace<Book>("DB1", "CS Book", std::vector<std::string>{"Author"},
+                      "isbn-cs", "Pub", 2024, Money::of(100));
+    cat.emplace<Book>("DB2", "Physics Book", std::vector<std::string>{"Author"},
+                      "isbn-ph", "Pub", 2024, Money::of(150));
+
+    Budget defaultBudget(Money::of(1000));
+    Budget csBudget(Money::of(500));
+    csBudget.setQuota(ResourceCategory::Book, {3, Money::of(300)});
+
+    Budget physicsBudget(Money::of(1000));
+    physicsBudget.setQuota(ResourceCategory::Book, {5, Money::of(800)});
+
+    AcquisitionManager acq(cat, defaultBudget);
+    acq.setDepartmentBudget("Computer Science", csBudget);
+    acq.setDepartmentBudget("Physics", physicsBudget);
+
+    // CS department purchases 2 copies of DB1 (cost 200) -> OK
+    const auto recCS = acq.purchase("DB1", 2, "Computer Science");
+    int csOrderNo = recCS.orderNo;
+    CHECK(recCS.approved);
+    CHECK(recCS.department == "Computer Science");
+
+    // Physics department purchases 3 copies of DB2 (cost 450) -> OK
+    const auto recPh = acq.purchase("DB2", 3, "Physics");
+    CHECK(recPh.approved);
+    CHECK(recPh.department == "Physics");
+
+    // Attempting 2 more copies for CS (total 4 copies > 3 max quota) -> fails
+    std::string reason;
+    CHECK(!acq.canPurchase("DB1", 2, &reason, "Computer Science"));
+    CHECK(reason.find("unit quota exceeded") != std::string::npos);
+
+    // Process batch with mixed department requests
+    auto batchRes = acq.processBatch({
+        {"DB1", 1, "Computer Science"}, // 1 copy OK (3/3 used)
+        {"DB1", 1, "Computer Science"}, // 1 copy rejected (unit quota)
+        {"DB2", 1, "Physics"}           // 1 copy OK (4/5 used)
+    });
+
+    CHECK(batchRes.size() == 3);
+    CHECK(batchRes[0].approved);
+    CHECK(batchRes[0].department == "Computer Science");
+    CHECK(!batchRes[1].approved);
+    CHECK(batchRes[1].department == "Computer Science");
+    CHECK(batchRes[2].approved);
+    CHECK(batchRes[2].department == "Physics");
+
+    // Cancellation of CS order refunds CS budget
+    CHECK(acq.cancel(csOrderNo));
+    // CS can now purchase again
+    CHECK(acq.canPurchase("DB1", 1, nullptr, "Computer Science"));
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── Q10 tests ────────────────────────────────────────────────────────────────
+static void testRollover() {
+    Budget b(Money::of(1000));
+    b.setQuota(ResourceCategory::Book, {10, Money::of(800)});
+
+    // Spend 400 out of 1000 -> 600 remaining
+    b.commit(ResourceCategory::Book, 2, Money::of(400));
+    CHECK(b.spent() == Money::of(400));
+    CHECK(b.remaining() == Money::of(600));
+
+    // Rollover 50% of remaining 600 (300) into a new base budget of 1000
+    // Resulting next year total = 1000 + 300 = 1300
+    Budget nextYear = b.rollover(50.0, Money::of(1000));
+    CHECK(nextYear.total() == Money::of(1300));
+    CHECK(nextYear.spent() == Money::of(0));
+    CHECK(nextYear.remaining() == Money::of(1300));
+
+    // Quotas are preserved in next year's budget
+    auto q = nextYear.quotaFor(ResourceCategory::Book);
+    CHECK(static_cast<bool>(q));
+    CHECK(q->maxUnits == 10);
+    CHECK(q->maxSpend == Money::of(800));
+
+    // Next year's usage starts fresh at 0
+    CHECK(nextYear.usageFor(ResourceCategory::Book).units == 0);
+    CHECK(nextYear.usageFor(ResourceCategory::Book).spent == Money::of(0));
+
+    // Original budget is unmodified
+    CHECK(b.total() == Money::of(1000));
+    CHECK(b.spent() == Money::of(400));
+
+    // Invalid rollover percentages throw invalid_argument
+    CHECK_THROWS(b.rollover(-5.0), std::invalid_argument);
+    CHECK_THROWS(b.rollover(105.0), std::invalid_argument);
+    CHECK_THROWS(b.rollover(50.0, Money::of(-100)), std::invalid_argument);
+
+    // Test department budget rollover via AcquisitionManager
+    Catalog cat;
+    cat.emplace<Book>("RB1", "Rollover Book", std::vector<std::string>{"Author"},
+                      "isbn-r", "Pub", 2024, Money::of(100));
+
+    Budget defaultB(Money::of(5000));
+    Budget csB(Money::of(2000));
+    csB.setQuota(ResourceCategory::Book, {10, Money::of(1500)});
+
+    AcquisitionManager acq(cat, defaultB);
+    acq.setDepartmentBudget("Computer Science", csB);
+
+    // CS spends 500 out of 2000 -> 1500 remaining
+    acq.purchase("RB1", 5, "Computer Science");
+
+    // Rollover CS budget with 20% carry-forward (20% of 1500 = 300) into 3000 base
+    Budget nextCS = acq.rolloverBudget("Computer Science", 20.0, Money::of(3000));
+    CHECK(nextCS.total() == Money::of(3300));
+    CHECK(nextCS.spent() == Money::of(0));
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 int main() {
     testMoney();
     testResourcesAndCost();
@@ -369,6 +620,10 @@ int main() {
     testBudget();
     testAcquisition();
     testTaxes();
+    testTitleQuota();
+    testCancellation();
+    testDepartmentBudgets();
+    testRollover();
     std::cout << (g_checks - g_failures) << "/" << g_checks << " checks passed\n";
     return g_failures == 0 ? 0 : 1;
 }

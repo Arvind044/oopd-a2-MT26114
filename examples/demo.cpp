@@ -130,5 +130,122 @@ int main() {
     taxAcq.purchase("R001", 2);
 
     taxAcq.printReport(std::cout);
+
+    // ── Q7: Title-quota demonstration ─────────────────────────────────────────
+    std::cout << "\n=== Q7: Title Quota Demo ===\n";
+
+    Catalog titleCatalog;
+    titleCatalog.emplace<Book>("D001", "Design Patterns",
+        std::vector<std::string>{"GoF"}, "isbn-dp", "AW", 1994, Money::of(300));
+    titleCatalog.emplace<Book>("D002", "Refactoring",
+        std::vector<std::string>{"Fowler"}, "isbn-rf", "AW", 1999, Money::of(280));
+    titleCatalog.emplace<Book>("D003", "Clean Code",
+        std::vector<std::string>{"Martin"}, "isbn-cc", "PH", 2008, Money::of(260));
+
+    Budget titleBudget(Money::of(50000));
+    // Allow at most 2 distinct Book titles
+    titleBudget.setQuota(ResourceCategory::Book, {50, Money::of(40000), 2});
+
+    AcquisitionManager titleAcq(titleCatalog, titleBudget);
+
+    std::cout << "Buying 3 copies of 'Design Patterns'...\n";
+    titleAcq.purchase("D001", 3);
+
+    std::cout << "Buying 2 more copies of 'Design Patterns' (same title, OK)...\n";
+    titleAcq.purchase("D001", 2);
+
+    std::cout << "Buying 1 copy of 'Refactoring' (2nd distinct title)...\n";
+    titleAcq.purchase("D002", 1);
+
+    std::cout << "Attempting to buy 'Clean Code' (3rd distinct title, limit=2)...\n";
+    try {
+        titleAcq.purchase("D003", 1);
+    } catch (const QuotaExceededError& e) {
+        std::cout << "  -> QuotaExceededError: " << e.what() << "\n";
+    }
+
+    titleAcq.printReport(std::cout);
+    titleBudget.print(std::cout);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Q8: Order Cancellation demonstration ──────────────────────────────────
+    std::cout << "\n=== Q8: Order Cancellation Demo ===\n";
+
+    Catalog cancelCatalog;
+    cancelCatalog.emplace<Book>("C001", "Structure and Interpretation of Computer Programs",
+        std::vector<std::string>{"Abelson", "Sussman"}, "978-0262510875", "MIT Press", 1996, Money::of(500));
+
+    Budget cancelBudget(Money::of(10000));
+    cancelBudget.setQuota(ResourceCategory::Book, {10, Money::of(5000)});
+
+    AcquisitionManager cancelAcq(cancelCatalog, cancelBudget);
+
+    std::cout << "Initial state: Holdings = " << cancelCatalog.holdings("C001")
+              << ", Spent = " << cancelBudget.spent() << "\n";
+
+    std::cout << "Purchasing 4 copies of C001...\n";
+    const auto& order = cancelAcq.purchase("C001", 4);
+    std::cout << "Approved Order #" << order.orderNo << ", Spent = " << cancelBudget.spent()
+              << ", Holdings = " << cancelCatalog.holdings("C001") << "\n";
+
+    std::cout << "Cancelling Order #" << order.orderNo << "...\n";
+    bool success = cancelAcq.cancel(order.orderNo);
+    std::cout << "Cancellation result: " << (success ? "SUCCESS" : "FAILED") << "\n";
+    std::cout << "After cancellation: Spent = " << cancelBudget.spent()
+              << ", Holdings = " << cancelCatalog.holdings("C001") << "\n";
+
+    std::cout << "\n=== Cancellation Report ===\n";
+    cancelAcq.printReport(std::cout);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Q9: Department Budgets demonstration ─────────────────────────────────
+    std::cout << "\n=== Q9: Department Budgets Demo ===\n";
+
+    Catalog deptCatalog;
+    deptCatalog.emplace<Book>("CS1", "Introduction to Algorithms",
+        std::vector<std::string>{"Cormen", "Leiserson"}, "978-0262033848", "MIT Press", 2009, Money::of(600));
+    deptCatalog.emplace<Book>("PH1", "Feynman Lectures on Physics",
+        std::vector<std::string>{"Feynman"}, "978-0465023820", "Basic Books", 2011, Money::of(800));
+
+    Budget defaultDeptBudget(Money::of(10000));
+
+    Budget csDeptBudget(Money::of(5000));
+    csDeptBudget.setQuota(ResourceCategory::Book, {5, Money::of(3000)});
+
+    Budget physDeptBudget(Money::of(8000));
+    physDeptBudget.setQuota(ResourceCategory::Book, {10, Money::of(5000)});
+
+    AcquisitionManager deptAcq(deptCatalog, defaultDeptBudget);
+    deptAcq.setDepartmentBudget("Computer Science", csDeptBudget);
+    deptAcq.setDepartmentBudget("Physics", physDeptBudget);
+
+    std::cout << "Processing department batch requests...\n";
+    deptAcq.processBatch({
+        {"CS1", 3, "Computer Science"}, // 1800 OK
+        {"PH1", 2, "Physics"},          // 1600 OK
+        {"CS1", 4, "Computer Science"}, // 2400 Rejected (exceeds CS unit quota 5 max)
+    });
+
+    std::cout << "\n=== Department Acquisition Report ===\n";
+    deptAcq.printReport(std::cout);
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // ── Q10: Year-End Rollover demonstration ──────────────────────────────────
+    std::cout << "\n=== Q10: Year-End Rollover Demo ===\n";
+
+    Budget thisYearBudget(Money::of(10000));
+    thisYearBudget.setQuota(ResourceCategory::Book, {10, Money::of(6000)});
+    thisYearBudget.commit(ResourceCategory::Book, 4, Money::of(4000));
+
+    std::cout << "This Year Budget:\n";
+    thisYearBudget.print(std::cout);
+
+    std::cout << "\nRolling over with 50% carry-forward into next year's 12000 base budget...\n";
+    Budget nextYearBudget = thisYearBudget.rollover(50.0, Money::of(12000));
+
+    std::cout << "Next Year Budget (Total = 12000 base + 3000 carry-forward = 15000):\n";
+    nextYearBudget.print(std::cout);
+    // ─────────────────────────────────────────────────────────────────────────
+
     return 0;
 }

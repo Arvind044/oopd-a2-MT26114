@@ -68,8 +68,8 @@ void Catalog::addHoldings(const std::string& id, int units) {
 std::vector<const Resource*> Catalog::where(
     const std::function<bool(const Resource&)>& pred) const {
     std::vector<const Resource*> out;
-    for (const auto& [id, entry] : items_)
-        if (pred(*entry.resource)) out.push_back(entry.resource.get());
+    for (const auto& kv : items_)
+        if (pred(*kv.second.resource)) out.push_back(kv.second.resource.get());
     return out;
 }
 
